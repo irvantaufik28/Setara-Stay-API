@@ -11,8 +11,19 @@ Request:
 Success (`200`):
 
 ```json
-{ "answer": "...", "modelUsed": "...", "dataSource": "model" }
+{
+  "answer": "...",
+  "modelUsed": "...",
+  "dataSource": "model",
+  "conversationId": "uuid",
+  "userMessage": { "id": "uuid", "role": "user", "content": "Halo", "modelUsed": null, "dataSource": null, "createdAt": "..." },
+  "assistantMessage": { "id": "uuid", "role": "assistant", "content": "...", "modelUsed": "...", "dataSource": "model", "createdAt": "..." }
+}
 ```
+
+Pass `conversationId` with the next message to append to that conversation. Omit it to create a new conversation. The ID must belong to the authenticated user; an unknown or other user's ID returns `404 NOT_FOUND`. The question and answer are inserted atomically only after the model succeeds, so failed attempts do not create incomplete exchanges.
+
+`GET /api/v1/admin/ai/conversations?offset=0&limit=50` returns `{ items, hasMore }` for the logged-in user, newest first. Each item has `id`, `title`, `createdAt`, and `updatedAt`. `GET /api/v1/admin/ai/conversations/:id?limit=50` returns `{ conversation, messages, hasMore, nextBefore }` with the latest messages in chronological order. Pass `before=<nextBefore>` to load older messages. Both endpoints require authentication and return `Cache-Control: no-store`; conversation ownership is checked on every read.
 
 General questions go directly to the model without tools. Questions requesting actual hotel revenue are routed to the read-only report tool automatically and require a model that supports tool calling:
 
@@ -94,12 +105,13 @@ The model selects one dataset and optional filters, but receives no exported rec
 
 For general conversation, `dataSource` is `model`.
 
-The request body accepts only `message` (1–1000 characters). This API is stateless; it does not accept a conversation ID. The single-hotel database has no reservation-level hotel ID. For hotel revenue questions, revenue defaults to payment dates and means payments minus refunds. A question may explicitly request booking-date or check-in-date revenue instead. The AI report can query a requested date range or all-time data; row results are paged. One question can cause up to three read-only report calls per model attempt.
+The chat request body accepts `message` (1–1000 characters) and optional `conversationId`. The export request still accepts only `message`. The API persists chat history but each AI question is currently processed independently; prior messages are not sent to the model as context. The single-hotel database has no reservation-level hotel ID. For hotel revenue questions, revenue defaults to payment dates and means payments minus refunds. A question may explicitly request booking-date or check-in-date revenue instead. The AI report can query a requested date range or all-time data; row results are paged. One question can cause up to three read-only report calls per model attempt.
 
 Errors use `{ "error": { "code": "...", "message": "..." } }`:
 
 - `400`: invalid body
 - `401`: no valid admin session
+- `404`: conversation ID does not exist or belongs to another user
 - `403`: the caller's role lacks the permission required by the requested data tool (`dashboard.view`, `reports.view_revenue`, `reports.view_reservations`, `rooms.view_types`, `rooms.view_numbers`, `prices_stocks.view`, `master.view`, `cancellation_policies.view`, `campaigns.view`, `experiences.view`, `guests.view`, `guests.view_stay_history`, `payments.view`, or the reservation view's permission); other-user and role views additionally require Owner
 - `429`: more than 10 requests per minute from one client
 - `503 AI_NOT_CONFIGURED`: missing OpenRouter configuration
@@ -107,4 +119,4 @@ Errors use `{ "error": { "code": "...", "message": "..." } }`:
 
 In development, `AI_UNAVAILABLE` also returns `diagnostics` with the attempt number, failed stage, safe reason, and HTTP status when available. The same fields appear in the API warning log. Model IDs, prompts, API keys, and provider response bodies are excluded from diagnostics.
 
-To test manually, start the API with `npm run dev`, obtain an access token from `POST /api/v1/admin/auth/login`, then send a request with `Authorization: Bearer <accessToken>` and `Content-Type: application/json`. Compare a dashboard answer with `GET /api/v1/admin/dashboard`. Compare a payment-date answer with `GET /api/v1/admin/reports/revenue?dateBy=payment&from=YYYY-MM-DD&to=YYYY-MM-DD` using the same date range and its `totals.netCollected` field. Compare reservations and room performance answers with `GET /api/v1/admin/reports/reservations` and `GET /api/v1/admin/reports/room-performance?from=YYYY-MM-DD`. Compare a reservation answer with the matching `GET /api/v1/admin/reservations` view. Compare room-status answers with `GET /api/v1/admin/room-numbers` using the same search or status filter. Compare catalog answers with `GET /api/v1/admin/room-types`, `GET /api/v1/admin/room-numbers`, `GET /api/v1/admin/room-maintenance-blocks`, or `GET /api/v1/admin/prices-stocks` using the same filters. Compare a master answer with `GET /api/v1/admin/master/payment-methods`, `GET /api/v1/admin/master/capacity-patterns`, or `GET /api/v1/admin/settings/reservations` as appropriate. Compare commercial answers with `GET /api/v1/admin/cancellation-policies`, `GET /api/v1/admin/campaigns`, or `GET /api/v1/admin/experiences` with matching filters. Compare guest, payment, and user answers with their matching GET endpoints. For CSV, send the same bearer header and JSON body to `POST /api/v1/admin/ai/export`, save the response as `.csv`, and check `X-Export-Row-Count` and `Content-Disposition`. No database migration is needed.
+To test manually, apply the generated migration `drizzle/0025_high_boomer.sql` in your deployment process, then start the API with `npm run dev` and obtain an access token from `POST /api/v1/admin/auth/login`. Send `POST /api/v1/admin/ai/chat` with `Authorization: Bearer <accessToken>` and `Content-Type: application/json`. Use its `conversationId` in a second chat request, then confirm both exchanges in `GET /api/v1/admin/ai/conversations/:id`. A different account must receive `404` for that ID and must not see it in its conversation list. Compare a dashboard answer with `GET /api/v1/admin/dashboard`. Compare a payment-date answer with `GET /api/v1/admin/reports/revenue?dateBy=payment&from=YYYY-MM-DD&to=YYYY-MM-DD` using the same date range and its `totals.netCollected` field. Compare reservations and room performance answers with `GET /api/v1/admin/reports/reservations` and `GET /api/v1/admin/reports/room-performance?from=YYYY-MM-DD`. Compare a reservation answer with the matching `GET /api/v1/admin/reservations` view. Compare room-status answers with `GET /api/v1/admin/room-numbers` using the same search or status filter. Compare catalog answers with `GET /api/v1/admin/room-types`, `GET /api/v1/admin/room-numbers`, `GET /api/v1/admin/room-maintenance-blocks`, or `GET /api/v1/admin/prices-stocks` using the same filters. Compare a master answer with `GET /api/v1/admin/master/payment-methods`, `GET /api/v1/admin/master/capacity-patterns`, or `GET /api/v1/admin/settings/reservations` as appropriate. Compare commercial answers with `GET /api/v1/admin/cancellation-policies`, `GET /api/v1/admin/campaigns`, or `GET /api/v1/admin/experiences` with matching filters. Compare guest, payment, and user answers with their matching GET endpoints. For CSV, send the same bearer header and JSON body to `POST /api/v1/admin/ai/export`, save the response as `.csv`, and check `X-Export-Row-Count` and `Content-Disposition`.

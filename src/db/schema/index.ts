@@ -1,4 +1,6 @@
 export * from "./audit_logs.schema.js";
+export * from "./ai_chat_conversations.schema.js";
+export * from "./ai_chat_messages.schema.js";
 export * from "./campaign_blackout_dates.schema.js";
 export * from "./campaign_days.schema.js";
 export * from "./campaign_room_types.schema.js";

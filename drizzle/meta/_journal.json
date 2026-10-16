@@ -176,6 +176,13 @@
       "when": 1791557384824,
       "tag": "0024_easy_echo",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1792163334383,
+      "tag": "0025_high_boomer",
+      "breakpoints": true
     }
   ]
 }

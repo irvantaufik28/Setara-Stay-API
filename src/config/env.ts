@@ -29,6 +29,13 @@ export type AppConfig = {
     fromName: string;
     replyTo: string;
   } | null;
+  openRouter: {
+    apiKey: string;
+    models: string[];
+    baseUrl: string;
+    timeoutMs: number;
+    maxModelAttempts: number;
+  } | null;
 };
 
 const environments = ["development", "production", "test"] as const;
@@ -86,6 +93,22 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
   const emailFromAddress = environment.EMAIL_FROM_ADDRESS?.trim() ?? "";
   const emailFromName = environment.EMAIL_FROM_NAME?.trim() ?? "";
   const emailReplyTo = environment.EMAIL_REPLY_TO?.trim() ?? "";
+  const openRouterApiKey = environment.OPENROUTER_API_KEY?.trim() ?? "";
+  const openRouterModelsValue = environment.OPENROUTER_MODELS?.trim() ?? "";
+  const openRouterModels = [
+    ...new Set(
+      openRouterModelsValue
+        .split(",")
+        .map((model) => model.trim())
+        .filter(Boolean),
+    ),
+  ];
+  const openRouterBaseUrl =
+    environment.OPENROUTER_BASE_URL?.trim() || "https://openrouter.ai/api/v1";
+  const openRouterTimeoutMs = Number(environment.OPENROUTER_TIMEOUT_MS ?? "30000");
+  const openRouterMaxModelAttempts = Number(
+    environment.OPENROUTER_MAX_MODEL_ATTEMPTS ?? String(Math.max(1, openRouterModels.length)),
+  );
 
   if (!environments.includes(nodeEnv as AppConfig["nodeEnv"])) {
     throw new Error("NODE_ENV must be development, production, or test");
@@ -192,6 +215,47 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
   if (emailProvider && emailPort === 465 && !emailSecure) {
     throw new Error("EMAIL_SECURE must be true when EMAIL_PORT is 465");
   }
+  if (Boolean(openRouterApiKey) !== Boolean(openRouterModelsValue)) {
+    throw new Error("OPENROUTER_API_KEY and OPENROUTER_MODELS must be set together");
+  }
+  if (openRouterApiKey) {
+    let parsedOpenRouterBaseUrl: URL;
+    try {
+      parsedOpenRouterBaseUrl = new URL(openRouterBaseUrl);
+    } catch {
+      throw new Error("OPENROUTER_BASE_URL must be an absolute HTTPS URL");
+    }
+    if (
+      parsedOpenRouterBaseUrl.protocol !== "https:" ||
+      parsedOpenRouterBaseUrl.search ||
+      parsedOpenRouterBaseUrl.hash ||
+      parsedOpenRouterBaseUrl.username ||
+      parsedOpenRouterBaseUrl.password
+    ) {
+      throw new Error(
+        "OPENROUTER_BASE_URL must be an absolute HTTPS URL without credentials, query, or hash",
+      );
+    }
+    if (openRouterModels.length === 0) {
+      throw new Error("OPENROUTER_MODELS must contain at least one model ID");
+    }
+    if (
+      !Number.isInteger(openRouterTimeoutMs) ||
+      openRouterTimeoutMs < 1000 ||
+      openRouterTimeoutMs > 120000
+    ) {
+      throw new Error("OPENROUTER_TIMEOUT_MS must be an integer between 1000 and 120000");
+    }
+    if (
+      !Number.isInteger(openRouterMaxModelAttempts) ||
+      openRouterMaxModelAttempts < 1 ||
+      openRouterMaxModelAttempts > openRouterModels.length
+    ) {
+      throw new Error(
+        "OPENROUTER_MAX_MODEL_ATTEMPTS must be an integer between 1 and the number of configured models",
+      );
+    }
+  }
 
   return {
     nodeEnv: nodeEnv as AppConfig["nodeEnv"],
@@ -221,6 +285,15 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
           fromAddress: emailFromAddress,
           fromName: emailFromName,
           replyTo: emailReplyTo,
+        }
+      : null,
+    openRouter: openRouterApiKey
+      ? {
+          apiKey: openRouterApiKey,
+          models: openRouterModels,
+          baseUrl: openRouterBaseUrl.replace(/\/+$/, ""),
+          timeoutMs: openRouterTimeoutMs,
+          maxModelAttempts: openRouterMaxModelAttempts,
         }
       : null,
   };

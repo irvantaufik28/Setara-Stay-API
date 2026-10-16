@@ -33,6 +33,18 @@ export const userRoutes: FastifyPluginAsync = async (app) => {
     async () => ({ items: await listActiveRoles(app) }),
   );
 
+  app.get<{ Params: IdParams }>(
+    "/:id",
+    {
+      preHandler: [app.requirePermission("master.view"), requireOwner],
+      schema: { params: userIdParamsSchema },
+    },
+    async (request, reply) => {
+      const user = await getUser(app, request.params.id);
+      return user ? { user } : reply.code(404).send(errorBody("NOT_FOUND", "User not found"));
+    },
+  );
+
   app.post<{ Body: CreateUserBody }>(
     "/",
     {

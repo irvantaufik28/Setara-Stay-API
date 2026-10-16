@@ -10,6 +10,7 @@ export type ReservationReadArgs = {
   source?: "website" | "phone" | "walk_in" | "ota";
   reservationStatus?: string;
   paymentStatus?: string;
+  roomAssignment?: "unassigned";
   operationalStatus?: string;
   stayDate?: string;
   stayDateFrom?: string;
@@ -49,6 +50,7 @@ const allowedByView: Record<ReservationView, readonly (keyof ReservationReadArgs
     "source",
     "reservationStatus",
     "paymentStatus",
+    "roomAssignment",
     "stayDate",
     "stayDateFrom",
     "stayDateTo",
@@ -105,6 +107,7 @@ export function parseReservationReadArgs(value: unknown): ReservationReadArgs {
       !["unpaid", "partial", "paid", "failed", "expired", "refunded"].includes(
         input.paymentStatus as string,
       )) ||
+    (input.roomAssignment !== undefined && input.roomAssignment !== "unassigned") ||
     (input.operationalStatus !== undefined &&
       !["in_house", "due_out", "overdue", "checked_out"].includes(
         input.operationalStatus as string,
@@ -147,6 +150,7 @@ export function parseReservationReadArgs(value: unknown): ReservationReadArgs {
     source: input.source as ReservationReadArgs["source"],
     reservationStatus: input.reservationStatus as string | undefined,
     paymentStatus: input.paymentStatus as string | undefined,
+    roomAssignment: input.roomAssignment as "unassigned" | undefined,
     operationalStatus: input.operationalStatus as string | undefined,
     stayDate: input.stayDate as string | undefined,
     stayDateFrom: input.stayDateFrom as string | undefined,

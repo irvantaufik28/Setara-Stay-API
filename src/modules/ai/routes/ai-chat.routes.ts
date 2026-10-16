@@ -11,11 +11,16 @@ import {
 } from "../schemas/ai-chat.schema.js";
 import {
   AiConversationNotFoundError,
+  deleteAiConversation,
   getAiConversation,
   getAiConversationPage,
   listAiConversations,
   saveAiExchange,
 } from "../services/ai-history.service.js";
+import {
+  getRecentAiUserQuestions,
+  needsConversationContext,
+} from "../services/ai-chat-context.service.js";
 import {
   AiPermissionError,
   AiUpstreamError,
@@ -67,6 +72,21 @@ export const aiChatRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
+  app.delete<{ Params: { id: string } }>(
+    "/conversations/:id",
+    { preHandler: app.authenticate, schema: { params: aiConversationParamsSchema } },
+    async (request, reply) => {
+      reply.header("Cache-Control", "no-store");
+      const deleted = await deleteAiConversation(app.db, request.authUser!.id, request.params.id);
+      if (!deleted) {
+        return reply.code(404).send({
+          error: { code: "NOT_FOUND", message: "Conversation not found" },
+        });
+      }
+      return reply.code(204).send();
+    },
+  );
+
   app.post<{ Body: AiChatBody }>(
     "/chat",
     {
@@ -95,12 +115,21 @@ export const aiChatRoutes: FastifyPluginAsync = async (app) => {
       try {
         const runtime = createOpenRouterRuntime(config);
         const permissions = new Set(await getRolePermissions(app, request.authUser!.roleId));
+        const previousQuestions =
+          request.body.conversationId && needsConversationContext(request.body.message)
+            ? await getRecentAiUserQuestions(
+                app.db,
+                request.authUser!.id,
+                request.body.conversationId,
+              )
+            : [];
         const answer = await answerChatQuestion(
           runtime,
           app,
           request.headers.authorization ?? "",
           request.body.message,
           permissions,
+          previousQuestions,
         );
         const stored = await saveAiExchange(
           app.db,
@@ -117,8 +146,14 @@ export const aiChatRoutes: FastifyPluginAsync = async (app) => {
           });
         }
         if (error instanceof AiPermissionError) {
-          return reply.code(403).send({
-            error: { code: "FORBIDDEN", message: "Permission denied" },
+          return reply.code(error.statusCode).send({
+            error:
+              error.statusCode === 401
+                ? { code: "UNAUTHORIZED", message: "Session expired" }
+                : { code: "FORBIDDEN", message: "Permission denied" },
+            ...(app.authConfig.nodeEnv === "production" || !error.requiredPermission
+              ? {}
+              : { requiredPermission: error.requiredPermission }),
           });
         }
         if (error instanceof AiUpstreamError) {
@@ -149,8 +184,16 @@ export const aiChatRoutes: FastifyPluginAsync = async (app) => {
         });
       }
       try {
+        if (
+          request.body.conversationId &&
+          !(await getAiConversation(app.db, request.authUser!.id, request.body.conversationId))
+        ) {
+          return reply.code(404).send({
+            error: { code: "NOT_FOUND", message: "Conversation not found" },
+          });
+        }
         const runtime = createOpenRouterRuntime(config);
-        const { request: exportRequest } = await resolveExportRequest(
+        const { request: exportRequest, modelUsed } = await resolveExportRequest(
           runtime,
           request.body.message,
         );
@@ -159,13 +202,30 @@ export const aiChatRoutes: FastifyPluginAsync = async (app) => {
           request.headers.authorization ?? "",
           exportRequest,
         );
+        const stored = await saveAiExchange(
+          app.db,
+          request.authUser!.id,
+          request.body.conversationId,
+          request.body.message,
+          {
+            answer: `File CSV siap diunduh. ${count} baris data diekspor.`,
+            modelUsed,
+            dataSource: "export",
+          },
+        );
         const filename = `${exportRequest.dataset}-${new Date().toISOString().slice(0, 10)}.csv`;
         return reply
           .header("Content-Disposition", `attachment; filename="${filename}"`)
           .header("X-Export-Row-Count", String(count))
+          .header("X-AI-Conversation-Id", stored.conversationId)
           .type("text/csv; charset=utf-8")
           .send(csv);
       } catch (error) {
+        if (error instanceof AiConversationNotFoundError) {
+          return reply.code(404).send({
+            error: { code: "NOT_FOUND", message: "Conversation not found" },
+          });
+        }
         if (error instanceof ExportError) {
           return reply.code(error.statusCode).send({
             error: {

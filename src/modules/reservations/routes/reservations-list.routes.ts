@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, ilike, inArray, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, gt, ilike, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { FastifyPluginAsync } from "fastify";
 import { guests } from "../../../db/schema/guests.schema.js";
 import { masterItems } from "../../../db/schema/master_items.schema.js";
@@ -15,6 +15,7 @@ type ListQuery = {
   reservationStatus?:
     "pending" | "confirmed" | "checked_in" | "checked_out" | "no_show" | "cancelled" | "expired";
   paymentStatus?: "unpaid" | "partial" | "paid" | "failed" | "expired" | "refunded";
+  roomAssignment?: "unassigned";
   stayDate?: string;
   stayDateFrom?: string;
   stayDateTo?: string;
@@ -45,6 +46,7 @@ const listQuerySchema = {
       type: "string",
       enum: ["unpaid", "partial", "paid", "failed", "expired", "refunded"],
     },
+    roomAssignment: { type: "string", enum: ["unassigned"] },
     stayDate: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
     stayDateFrom: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
     stayDateTo: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
@@ -78,6 +80,7 @@ export const reservationListRoutes: FastifyPluginAsync = async (app) => {
         source,
         reservationStatus,
         paymentStatus,
+        roomAssignment,
         stayDate,
         stayDateFrom,
         stayDateTo,
@@ -113,6 +116,19 @@ export const reservationListRoutes: FastifyPluginAsync = async (app) => {
         source ? eq(reservations.source, source) : undefined,
         reservationStatus ? eq(reservations.reservationStatus, reservationStatus) : undefined,
         paymentStatus ? eq(reservations.paymentStatus, paymentStatus) : undefined,
+        roomAssignment === "unassigned"
+          ? exists(
+              app.db
+                .select({ id: reservationRooms.id })
+                .from(reservationRooms)
+                .where(
+                  and(
+                    eq(reservationRooms.reservationId, reservations.id),
+                    isNull(reservationRooms.roomUnitId),
+                  ),
+                ),
+            )
+          : undefined,
         stayDate
           ? and(lte(reservations.checkInDate, stayDate), gt(reservations.checkOutDate, stayDate))
           : undefined,

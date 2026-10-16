@@ -58,6 +58,14 @@ export async function getAiConversation(db: Database, userId: string, id: string
   return conversation ?? null;
 }
 
+export async function deleteAiConversation(db: Database, userId: string, id: string) {
+  const [deleted] = await db
+    .delete(aiChatConversations)
+    .where(and(eq(aiChatConversations.id, id), eq(aiChatConversations.userId, userId)))
+    .returning({ id: aiChatConversations.id });
+  return Boolean(deleted);
+}
+
 export async function getAiConversationPage(
   db: Database,
   userId: string,

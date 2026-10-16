@@ -1,5 +1,5 @@
 export type AiChatBody = { message: string; conversationId?: string };
-export type AiExportBody = { message: string };
+export type AiExportBody = { message: string; conversationId?: string };
 
 export const aiChatBodySchema = {
   type: "object",
@@ -17,6 +17,7 @@ export const aiExportBodySchema = {
   required: ["message"],
   properties: {
     message: { type: "string", minLength: 1, maxLength: 1000, pattern: "\\S" },
+    conversationId: { type: "string", format: "uuid" },
   },
 } as const;
 

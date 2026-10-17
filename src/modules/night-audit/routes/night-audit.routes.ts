@@ -4,6 +4,7 @@ import { auditLogs } from "../../../db/schema/audit_logs.schema.js";
 import { nightAudits } from "../../../db/schema/night_audits.schema.js";
 import { nightAuditSettings } from "../../../db/schema/night_audit_settings.schema.js";
 import { users } from "../../../db/schema/users.schema.js";
+import { buildManagerDailySnapshot } from "../../reports/services/manager-daily-report.service.js";
 import {
   buildAuditPreview,
   closeWindowOpen,
@@ -316,11 +317,9 @@ export const nightAuditRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const actor = request.authUser!;
       if (!managerRole(actor.roleName)) {
-        return reply
-          .code(403)
-          .send({
-            error: { code: "MANAGER_REQUIRED", message: "Owner or Manager confirmation required" },
-          });
+        return reply.code(403).send({
+          error: { code: "MANAGER_REQUIRED", message: "Owner or Manager confirmation required" },
+        });
       }
       if (!validDate(request.params.businessDate) || !request.body.reason.trim()) {
         return reply
@@ -464,6 +463,11 @@ export const nightAuditRoutes: FastifyPluginAsync = async (app) => {
                 "Manager must provide a reason for warnings.",
               );
             }
+            const managerReport = await buildManagerDailySnapshot(
+              tx,
+              businessDate,
+              preview.summary,
+            );
             const [closed] = await tx
               .insert(nightAudits)
               .values({
@@ -473,6 +477,7 @@ export const nightAuditRoutes: FastifyPluginAsync = async (app) => {
                   ...preview,
                   closedByName: actor.name,
                   warningReason: warningReason?.trim() || null,
+                  managerReport,
                 },
               })
               .returning({ id: nightAudits.id, closedAt: nightAudits.closedAt });
@@ -485,6 +490,7 @@ export const nightAuditRoutes: FastifyPluginAsync = async (app) => {
                 ...preview,
                 closedByName: actor.name,
                 warningReason: warningReason?.trim() || null,
+                managerReport,
               },
             };
           },

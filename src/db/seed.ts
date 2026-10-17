@@ -220,6 +220,18 @@ const permissionSeeds: PermissionSeed[] = [
     label: "View Revenue Report",
     allowed: senior,
   },
+  {
+    code: "night_audit.view",
+    module: "Night Audit",
+    label: "View Night Audit Preview",
+    allowed: senior,
+  },
+  {
+    code: "night_audit.close",
+    module: "Night Audit",
+    label: "Close Night Audit",
+    allowed: senior,
+  },
 ];
 
 const userSeeds = [

@@ -18,6 +18,8 @@ export * from "./guests.schema.js";
 export * from "./hotel_facilities.schema.js";
 export * from "./hotel_info.schema.js";
 export * from "./master_items.schema.js";
+export * from "./night_audits.schema.js";
+export * from "./night_audit_settings.schema.js";
 export * from "./payment_sessions.schema.js";
 export * from "./payment_refunds.schema.js";
 export * from "./payment_webhook_events.schema.js";

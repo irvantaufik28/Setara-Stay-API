@@ -3,6 +3,7 @@ import { authRoutes } from "../../modules/auth/index.js";
 import { aiChatRoutes } from "../../modules/ai/index.js";
 import { profileRoutes } from "../../modules/profile/index.js";
 import { dashboardRoutes } from "../../modules/dashboard/index.js";
+import { nightAuditRoutes } from "../../modules/night-audit/index.js";
 import { masterRoutes } from "../../modules/master/index.js";
 import {
   roomTypeRoutes,
@@ -60,6 +61,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   await app.register(aiChatRoutes, { prefix: "/ai" });
   await app.register(profileRoutes, { prefix: "/profile" });
   await app.register(dashboardRoutes, { prefix: "/dashboard" });
+  await app.register(nightAuditRoutes, { prefix: "/night-audit" });
   await app.register(masterRoutes, { prefix: "/master" });
   await app.register(roomTypeRoutes, { prefix: "/room-types" });
   await app.register(roomNumberRoutes, { prefix: "/room-numbers" });

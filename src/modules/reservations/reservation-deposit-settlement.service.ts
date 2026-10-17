@@ -13,6 +13,7 @@ export type CheckoutDepositDecision = {
   depositId: string;
   refundAmount?: number;
   deductionAmount?: number;
+  damageAmount?: number;
   deductionPurpose?: "balance" | "damage";
   deferRemaining?: boolean;
   reason?: string;
@@ -60,6 +61,21 @@ export function validateCheckoutDeposits(
     const deductionAmount = decision.deductionAmount ?? 0;
     const remaining = deposit.amountHeld - deposit.amountRefunded - deposit.amountDeducted;
     const deferred = remaining - refundAmount - deductionAmount;
+    if (decision.damageAmount !== undefined) {
+      if (
+        decision.deductionPurpose !== "damage" ||
+        !Number.isSafeInteger(decision.damageAmount) ||
+        decision.damageAmount <= 0 ||
+        deductionAmount !== Math.min(remaining, decision.damageAmount) ||
+        refundAmount !== remaining - deductionAmount
+      ) {
+        throw new DepositSettlementError(
+          "INVALID_DAMAGE_SETTLEMENT",
+          "Damage charge, deposit deduction, and refund must settle the deposit exactly",
+          400,
+        );
+      }
+    }
     if (refundAmount + deductionAmount === 0 && !decision.deferRemaining) {
       throw new DepositSettlementError(
         "INVALID_DEPOSIT_DECISION",
@@ -105,6 +121,9 @@ export function validateCheckoutDeposits(
       }
       availableBookingBalance -= deductionAmount;
     }
+    if (decision.deductionPurpose === "damage") {
+      availableBookingBalance += (decision.damageAmount ?? deductionAmount) - deductionAmount;
+    }
   }
 }
 
@@ -129,24 +148,31 @@ export async function settleCheckoutDeposits(
     const refundAmount = decision.refundAmount ?? 0;
     const deductionAmount = decision.deductionAmount ?? 0;
     const reason = decision.reason?.trim() || null;
+    const damageAmount =
+      decision.deductionPurpose === "damage" ? (decision.damageAmount ?? deductionAmount) : 0;
     const refundedTotal = deposit.amountRefunded + refundAmount;
     const deductedTotal = deposit.amountDeducted + deductionAmount;
     const remaining = deposit.amountHeld - refundedTotal - deductedTotal;
 
-    if (deductionAmount > 0) {
-      if (decision.deductionPurpose === "damage") {
-        await tx.insert(reservationCharges).values({
+    let damageChargeId: string | null = null;
+    if (damageAmount > 0) {
+      const [charge] = await tx
+        .insert(reservationCharges)
+        .values({
           reservationId: input.reservationId,
           kind: "adjustment",
           sourceId: deposit.id,
-          description: `Deposit deduction for damage: ${reason}`,
+          description: `Damage charge at checkout: ${reason}`,
           quantity: "1",
-          unitAmount: deductionAmount,
-          amount: deductionAmount,
+          unitAmount: damageAmount,
+          amount: damageAmount,
           createdByUserId: input.actorUserId,
-        });
-        currentBookingTotal += deductionAmount;
-      }
+        })
+        .returning({ id: reservationCharges.id });
+      damageChargeId = charge.id;
+      currentBookingTotal += damageAmount;
+    }
+    if (deductionAmount > 0) {
       const paidAt = new Date();
       const [payment] = await tx
         .insert(payments)
@@ -221,6 +247,8 @@ export async function settleCheckoutDeposits(
       details: {
         refundAmount,
         deductionAmount,
+        damageAmount,
+        damageChargeId,
         deductionPurpose: decision.deductionPurpose ?? null,
         remaining,
         reason,
@@ -231,6 +259,7 @@ export async function settleCheckoutDeposits(
       depositId: deposit.id,
       refundAmount,
       deductionAmount,
+      damageAmount,
       remaining,
       status,
     });

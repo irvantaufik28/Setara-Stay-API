@@ -1,6 +1,8 @@
 import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
 import type { FastifyPluginAsync } from "fastify";
 import { permissions } from "../../../db/schema/permissions.schema.js";
+import { masterItems } from "../../../db/schema/master_items.schema.js";
+import { payments } from "../../../db/schema/payments.schema.js";
 import { reservationRooms } from "../../../db/schema/reservation_rooms.schema.js";
 import { reservations } from "../../../db/schema/reservations.schema.js";
 import { rolePermissions } from "../../../db/schema/role_permissions.schema.js";
@@ -29,6 +31,7 @@ type CheckOutBody = {
   acknowledgeEarlyDeparture?: boolean;
   lateCheckOut?: LateCheckOutInput;
   deposits?: CheckoutDepositDecision[];
+  settlementPayment?: { methodId: string; amount: number };
 };
 
 const paramsSchema = {
@@ -66,11 +69,21 @@ const bodySchema = {
           depositId: uuidSchema,
           refundAmount: { type: "integer", minimum: 0, maximum: 9007199254740991 },
           deductionAmount: { type: "integer", minimum: 0, maximum: 9007199254740991 },
+          damageAmount: { type: "integer", minimum: 1, maximum: 9007199254740991 },
           deductionPurpose: { type: "string", enum: ["balance", "damage"] },
           deferRemaining: { type: "boolean" },
           reason: { type: "string", maxLength: 2000 },
           refundReference: { type: "string", maxLength: 160 },
         },
+      },
+    },
+    settlementPayment: {
+      type: "object",
+      additionalProperties: false,
+      required: ["methodId", "amount"],
+      properties: {
+        methodId: uuidSchema,
+        amount: { type: "integer", minimum: 1, maximum: 9007199254740991 },
       },
     },
   },
@@ -237,6 +250,90 @@ export const reservationCheckOutRoutes: FastifyPluginAsync = async (app) => {
             financials: financialsBefore,
             decisions: depositDecisions,
           });
+          const beforeFinalPayment = await readReservationFinancials(tx, reservation.id);
+          let settlementPaymentId: string | null = null;
+          if (request.body?.settlementPayment) {
+            const settlement = request.body.settlementPayment;
+            if (settlement.amount !== beforeFinalPayment.remainingBalance) {
+              throw new CheckOutInputError(
+                "INVALID_CHECKOUT_PAYMENT_AMOUNT",
+                "Checkout payment must equal the remaining reservation balance",
+                400,
+              );
+            }
+            const [paymentPermission] = await tx
+              .select({ id: permissions.id })
+              .from(rolePermissions)
+              .innerJoin(permissions, eq(rolePermissions.permissionId, permissions.id))
+              .where(
+                and(
+                  eq(rolePermissions.roleId, request.authUser!.roleId),
+                  eq(permissions.code, "payments.record"),
+                ),
+              )
+              .limit(1);
+            if (!paymentPermission) {
+              throw new CheckOutInputError(
+                "CHECKOUT_PAYMENT_FORBIDDEN",
+                "Permission to record a checkout payment is required",
+                403,
+              );
+            }
+            const [method] = await tx
+              .select({ id: masterItems.id })
+              .from(masterItems)
+              .where(
+                and(
+                  eq(masterItems.id, settlement.methodId),
+                  eq(masterItems.category, "payment_methods"),
+                  eq(masterItems.isActive, true),
+                ),
+              )
+              .limit(1);
+            if (!method) {
+              throw new CheckOutInputError(
+                "INVALID_CHECKOUT_PAYMENT_METHOD",
+                "Select an active payment method",
+                400,
+              );
+            }
+            const paidAt = new Date();
+            const [payment] = await tx
+              .insert(payments)
+              .values({
+                reservationId: reservation.id,
+                methodId: method.id,
+                amount: settlement.amount,
+                status: "succeeded",
+                paidAt,
+                recordedByUserId: request.authUser!.id,
+                notes: "Remaining balance paid at checkout",
+              })
+              .returning({ id: payments.id });
+            settlementPaymentId = payment.id;
+            await recordReservationEvent(tx, {
+              reservationId: reservation.id,
+              eventType: "payment.recorded",
+              actorType: "user",
+              actorUserId: request.authUser!.id,
+              occurredAt: paidAt,
+              reservationStatusBefore: "checked_in",
+              reservationStatusAfter: "checked_in",
+              paymentStatusBefore:
+                beforeFinalPayment.remainingBalance === 0
+                  ? "paid"
+                  : beforeFinalPayment.netPaidAmount > 0
+                    ? "partial"
+                    : "unpaid",
+              paymentStatusAfter: "paid",
+              referenceId: payment.id,
+              details: {
+                amount: settlement.amount,
+                methodId: method.id,
+                source: "checkout_settlement",
+              },
+            });
+          }
           const financials = await readReservationFinancials(tx, reservation.id);
           const { bookingTotal, remainingBalance, depositBalance } = financials;
           const paidAmount = financials.netPaidAmount;
@@ -323,6 +420,7 @@ export const reservationCheckOutRoutes: FastifyPluginAsync = async (app) => {
               outstandingReason: warning === "outstanding" ? outstandingReason : null,
               depositBalance,
               depositOutcomes,
+              settlementPaymentId,
               roomUnitIds,
               checkoutTiming: {
                 kind: checkoutContext.kind,
@@ -351,6 +449,7 @@ export const reservationCheckOutRoutes: FastifyPluginAsync = async (app) => {
             checkoutOutstandingReason: warning === "outstanding" ? outstandingReason : null,
             depositBalance,
             depositOutcomes,
+            settlementPaymentId,
             roomUnitIds,
           };
         });

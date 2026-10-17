@@ -24,6 +24,8 @@ import {
   revenueReportRoutes,
   roomPerformanceReportRoutes,
   managerDailyReportRoutes,
+  arAgingReportRoutes,
+  depositReconciliationRoutes,
 } from "../../modules/reports/index.js";
 import { uploadRoutes } from "../../modules/uploads/index.js";
 import { roleRoutes, userRoutes } from "../../modules/users/index.js";
@@ -80,6 +82,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   await app.register(revenueReportRoutes, { prefix: "/reports" });
   await app.register(roomPerformanceReportRoutes, { prefix: "/reports" });
   await app.register(managerDailyReportRoutes, { prefix: "/reports" });
+  await app.register(arAgingReportRoutes, { prefix: "/reports" });
+  await app.register(depositReconciliationRoutes, { prefix: "/reports" });
   await app.register(uploadRoutes, { prefix: "/uploads" });
   await app.register(userRoutes, { prefix: "/users" });
   await app.register(roleRoutes, { prefix: "/roles" });

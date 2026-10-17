@@ -1,10 +1,13 @@
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
 import type { FastifyPluginAsync } from "fastify";
 import { guests } from "../../../db/schema/guests.schema.js";
-import { paymentRefunds } from "../../../db/schema/payment_refunds.schema.js";
-import { payments } from "../../../db/schema/payments.schema.js";
-import { reservationCharges } from "../../../db/schema/reservation_charges.schema.js";
 import { reservations } from "../../../db/schema/reservations.schema.js";
+import {
+  bookingTotal,
+  grossPaid,
+  refunded,
+  remainingBalance,
+} from "../services/outstanding-balance.sql.js";
 
 type Query = {
   search?: string;
@@ -23,26 +26,6 @@ const querySchema = {
     limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
   },
 } as const;
-
-const bookingTotal = sql<number>`coalesce((
-  select sum(c.amount) from ${reservationCharges} c
-  where c.reservation_id = ${reservations.id}
-), 0)::bigint`.mapWith(Number);
-
-const grossPaid = sql<number>`coalesce((
-  select sum(p.amount) from ${payments} p
-  where p.reservation_id = ${reservations.id}
-    and p.status in ('succeeded', 'partially_refunded', 'refunded')
-), 0)::bigint`.mapWith(Number);
-
-const refunded = sql<number>`coalesce((
-  select sum(r.amount) from ${paymentRefunds} r
-  join ${payments} p on p.id = r.payment_id
-  where p.reservation_id = ${reservations.id} and r.status = 'succeeded'
-), 0)::bigint`.mapWith(Number);
-
-const remainingBalance =
-  sql<number>`greatest(0, ${bookingTotal} - ${grossPaid} + ${refunded})`.mapWith(Number);
 
 export const paymentOutstandingRoutes: FastifyPluginAsync = async (app) => {
   app.get<{ Querystring: Query }>(

@@ -5,6 +5,11 @@ import { masterItems } from "../../../db/schema/master_items.schema.js";
 import { paymentRefunds } from "../../../db/schema/payment_refunds.schema.js";
 import { payments } from "../../../db/schema/payments.schema.js";
 import { reservationDeposits } from "../../../db/schema/reservation_deposits.schema.js";
+import {
+  DepositSettlementError,
+  settleCheckoutDeposits,
+  validateCheckoutDeposits,
+} from "../reservation-deposit-settlement.service.js";
 import { reservations } from "../../../db/schema/reservations.schema.js";
 import { uuidSchema } from "../../master/master.shared.js";
 import { recordReservationEvent } from "../services/reservation-events.service.js";
@@ -24,6 +29,14 @@ type RefundBody = {
   reference: string;
   ignoreCancellationPolicy?: boolean;
   settlementOverrideReason?: string;
+};
+type PostCheckoutDepositBody = {
+  action: "refund" | "damage";
+  expectedBalance: number;
+  damageAmount?: number;
+  reason: string;
+  refundReference?: string;
+  refundCompleted?: boolean;
 };
 
 const paramsSchema = {
@@ -63,6 +76,168 @@ class RefundInputError extends Error {
 }
 
 export const reservationRefundRoutes: FastifyPluginAsync = async (app) => {
+  app.post<{
+    Params: RefundParams & { depositId: string };
+    Body: PostCheckoutDepositBody;
+  }>(
+    "/:id/deposits/:depositId/settle",
+    {
+      preHandler: app.requirePermission("payments.refund"),
+      schema: {
+        params: depositRefundParamsSchema,
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["action", "expectedBalance", "reason"],
+          properties: {
+            action: { type: "string", enum: ["refund", "damage"] },
+            expectedBalance: { type: "integer", minimum: 1, maximum: 9007199254740991 },
+            damageAmount: { type: "integer", minimum: 1, maximum: 9007199254740991 },
+            reason: { type: "string", minLength: 1, maxLength: 2000 },
+            refundReference: { type: "string", maxLength: 160 },
+            refundCompleted: { type: "boolean" },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { action, damageAmount } = request.body;
+      const reason = request.body.reason.trim();
+      const refundReference = request.body.refundReference?.trim() ?? "";
+      if (
+        !reason ||
+        (action === "refund" && damageAmount !== undefined) ||
+        (action === "damage" && !damageAmount)
+      ) {
+        return reply.code(400).send({
+          error: {
+            code: "INVALID_DEPOSIT_SETTLEMENT",
+            message: "Choose a valid action and provide a reason",
+          },
+        });
+      }
+      if (action === "damage" && !["Owner", "Manager"].includes(request.authUser!.roleName)) {
+        return reply.code(403).send({
+          error: {
+            code: "MANAGER_REQUIRED",
+            message: "Owner or Manager approval is required for post-checkout damage",
+          },
+        });
+      }
+      try {
+        const result = await app.db.transaction(async (tx) => {
+          const [reservation] = await tx
+            .select()
+            .from(reservations)
+            .where(eq(reservations.id, request.params.id))
+            .for("update")
+            .limit(1);
+          if (!reservation)
+            throw new RefundInputError("RESERVATION_NOT_FOUND", "Reservation not found", 404);
+          if (reservation.reservationStatus !== "checked_out") {
+            throw new RefundInputError(
+              "DEPOSIT_SETTLEMENT_NOT_ALLOWED",
+              "Only checked-out reservations can use this settlement",
+              409,
+            );
+          }
+          const [deposit] = await tx
+            .select()
+            .from(reservationDeposits)
+            .where(
+              and(
+                eq(reservationDeposits.id, request.params.depositId),
+                eq(reservationDeposits.reservationId, reservation.id),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!deposit) throw new RefundInputError("DEPOSIT_NOT_FOUND", "Deposit not found", 404);
+          const heldBalance = deposit.amountHeld - deposit.amountRefunded - deposit.amountDeducted;
+          if (heldBalance <= 0)
+            throw new RefundInputError(
+              "DEPOSIT_ALREADY_SETTLED",
+              "Deposit has already been settled",
+              409,
+            );
+          if (heldBalance !== request.body.expectedBalance) {
+            throw new RefundInputError(
+              "DEPOSIT_BALANCE_CHANGED",
+              "Deposit balance changed. Refresh before settling it",
+              409,
+            );
+          }
+          const deductionAmount = action === "damage" ? Math.min(heldBalance, damageAmount!) : 0;
+          const refundAmount = heldBalance - deductionAmount;
+          if (refundAmount > 0 && (!refundReference || request.body.refundCompleted !== true)) {
+            throw new RefundInputError(
+              "REFUND_CONFIRMATION_REQUIRED",
+              "Confirm the completed refund and provide its reference",
+              400,
+            );
+          }
+          const financials = await readReservationFinancials(tx, reservation.id);
+          const scopedFinancials = { ...financials, deposits: [deposit] };
+          const decision = {
+            depositId: deposit.id,
+            refundAmount,
+            deductionAmount,
+            ...(action === "damage" ? { damageAmount, deductionPurpose: "damage" as const } : {}),
+            reason,
+            refundReference: refundAmount > 0 ? refundReference : undefined,
+          };
+          validateCheckoutDeposits(scopedFinancials, [decision]);
+          const outcomes = await settleCheckoutDeposits(tx, {
+            reservationId: reservation.id,
+            actorUserId: request.authUser!.id,
+            reservationStatus: "checked_out",
+            source: "post_checkout",
+            paymentStatus: reservation.paymentStatus,
+            financials: scopedFinancials,
+            decisions: [decision],
+          });
+          const after = await readReservationFinancials(tx, reservation.id);
+          const paymentStatus =
+            action === "refund"
+              ? reservation.paymentStatus
+              : after.remainingBalance === 0
+                ? "paid"
+                : after.netPaidAmount > 0
+                  ? "partial"
+                  : "unpaid";
+          await tx
+            .update(reservations)
+            .set({
+              paymentStatus,
+              version: sql`${reservations.version} + 1`,
+              updatedAt: new Date(),
+            })
+            .where(eq(reservations.id, reservation.id));
+          return {
+            reservationId: reservation.id,
+            depositId: deposit.id,
+            action,
+            refundAmount,
+            deductionAmount,
+            damageAmount: action === "damage" ? damageAmount : 0,
+            depositBalance: after.depositBalance,
+            remainingBalance: after.remainingBalance,
+            paymentStatus,
+            outcome: outcomes[0],
+          };
+        });
+        return reply.code(201).send(result);
+      } catch (error) {
+        if (error instanceof RefundInputError || error instanceof DepositSettlementError) {
+          return reply
+            .code(error.statusCode)
+            .send({ error: { code: error.code, message: error.message } });
+        }
+        throw error;
+      }
+    },
+  );
+
   app.post<{
     Params: RefundParams & { depositId: string };
     Body: { reason: string; reference: string };

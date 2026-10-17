@@ -5,6 +5,7 @@ type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 export type DepositQuery = {
   search?: string;
   view?: "open" | "all";
+  reservationStatus?: "all" | "checked_out";
   ledgerStatus?: "all" | "matched" | "review";
   page?: number;
   limit?: number;
@@ -37,13 +38,22 @@ export async function buildDepositReconciliation(
   capturedAt: string,
   query: DepositQuery,
 ) {
-  const { search, view = "open", ledgerStatus = "all", page = 1, limit = 20 } = query;
+  const {
+    search,
+    view = "open",
+    reservationStatus = "all",
+    ledgerStatus = "all",
+    page = 1,
+    limit = 20,
+  } = query;
   const term = search?.trim();
   const searchFilter = term
     ? sql`and (r.booking_code ilike ${`%${term}%`} or g.full_name ilike ${`%${term}%`})`
     : sql``;
   const openFilter =
     view === "open" ? sql`and d.amount_held > d.amount_refunded + d.amount_deducted` : sql``;
+  const reservationStatusFilter =
+    reservationStatus === "checked_out" ? sql`and r.reservation_status = 'checked_out'` : sql``;
   const needsReview = sql`(coalesce(ledger.held_event_count, 0) = 0
     or d.amount_held <> coalesce(ledger.held, 0)
     or d.amount_refunded <> coalesce(ledger.refunded, 0)
@@ -69,11 +79,11 @@ export async function buildDepositReconciliation(
       (d.amount_held - d.amount_refunded - d.amount_deducted)::bigint as balance,
       ledger.held_event_count, ledger.held as ledger_held, ledger.refunded as ledger_refunded,
       ledger.deducted as ledger_deducted, d.updated_at
-      ${base} where true ${searchFilter} ${openFilter} ${ledgerFilter}
+      ${base} where true ${searchFilter} ${openFilter} ${reservationStatusFilter} ${ledgerFilter}
       order by (d.amount_held - d.amount_refunded - d.amount_deducted) desc, d.id
       limit ${limit} offset ${(page - 1) * limit}`),
     db.execute(sql`select count(*)::int as total
-      ${base} where true ${searchFilter} ${openFilter} ${ledgerFilter}`),
+      ${base} where true ${searchFilter} ${openFilter} ${reservationStatusFilter} ${ledgerFilter}`),
   ]);
   const summary = summaryResult.rows[0] as Record<string, unknown>;
   return {
@@ -156,6 +166,7 @@ export async function listDepositMovements(
           details.deductionPurpose === "balance" || details.deductionPurpose === "damage"
             ? details.deductionPurpose
             : null,
+        source: details.source === "post_checkout" ? "post_checkout" : null,
         reason: typeof details.reason === "string" ? details.reason : null,
         reference: typeof details.refundReference === "string" ? details.refundReference : null,
       };

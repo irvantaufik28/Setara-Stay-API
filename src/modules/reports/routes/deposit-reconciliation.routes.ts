@@ -11,6 +11,7 @@ const querystring = {
   properties: {
     search: { type: "string", maxLength: 255 },
     view: { type: "string", enum: ["open", "all"] },
+    reservationStatus: { type: "string", enum: ["all", "checked_out"] },
     ledgerStatus: { type: "string", enum: ["all", "matched", "review"] },
     page: { type: "integer", minimum: 1, default: 1 },
     limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },

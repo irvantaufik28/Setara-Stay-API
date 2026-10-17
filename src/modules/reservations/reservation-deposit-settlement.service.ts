@@ -132,7 +132,8 @@ export async function settleCheckoutDeposits(
   input: {
     reservationId: string;
     actorUserId: string;
-    reservationStatus: "checked_in";
+    reservationStatus: "checked_in" | "checked_out";
+    source?: "checkout" | "post_checkout";
     paymentStatus: "unpaid" | "partial" | "paid" | "failed" | "expired" | "refunded";
     financials: Financials;
     decisions: CheckoutDepositDecision[];
@@ -162,7 +163,7 @@ export async function settleCheckoutDeposits(
           reservationId: input.reservationId,
           kind: "adjustment",
           sourceId: deposit.id,
-          description: `Damage charge at checkout: ${reason}`,
+          description: `Damage charge: ${reason}`,
           quantity: "1",
           unitAmount: damageAmount,
           amount: damageAmount,
@@ -249,6 +250,7 @@ export async function settleCheckoutDeposits(
         deductionAmount,
         damageAmount,
         damageChargeId,
+        source: input.source ?? "checkout",
         deductionPurpose: decision.deductionPurpose ?? null,
         remaining,
         reason,

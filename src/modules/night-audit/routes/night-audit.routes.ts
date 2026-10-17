@@ -1,5 +1,6 @@
-import { count, desc, eq, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, sql } from "drizzle-orm";
 import type { FastifyPluginAsync } from "fastify";
+import { auditLogs } from "../../../db/schema/audit_logs.schema.js";
 import { nightAudits } from "../../../db/schema/night_audits.schema.js";
 import { nightAuditSettings } from "../../../db/schema/night_audit_settings.schema.js";
 import { users } from "../../../db/schema/users.schema.js";
@@ -8,6 +9,7 @@ import {
   closeWindowOpen,
   getAuditState,
   jakartaDate,
+  type AuditPreview,
 } from "../services/night-audit.service.js";
 
 type SetupBody = { startDate: string; confirm: boolean };
@@ -18,6 +20,31 @@ type CloseBody = {
   confirm: boolean;
   warningReason?: string;
 };
+type CorrectionBody = { reason: string; previewToken: string };
+type FinancialSummary = Pick<
+  AuditPreview["summary"],
+  "roomRevenue" | "paymentsReceived" | "refundsPaid"
+>;
+
+function financialSummary(summary: AuditPreview["summary"]): FinancialSummary {
+  return {
+    roomRevenue: summary.roomRevenue,
+    paymentsReceived: summary.paymentsReceived,
+    refundsPaid: summary.refundsPaid,
+  };
+}
+
+function financialDelta(before: FinancialSummary, after: FinancialSummary): FinancialSummary {
+  return {
+    roomRevenue: after.roomRevenue - before.roomRevenue,
+    paymentsReceived: after.paymentsReceived - before.paymentsReceived,
+    refundsPaid: after.refundsPaid - before.refundsPaid,
+  };
+}
+
+function hasFinancialDelta(delta: FinancialSummary): boolean {
+  return Object.values(delta).some((value) => value !== 0);
+}
 
 const dateProperty = { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" } as const;
 const managerRole = (roleName: string) => roleName === "Owner" || roleName === "Manager";
@@ -38,6 +65,16 @@ class AuditError extends Error {
 }
 
 export const nightAuditRoutes: FastifyPluginAsync = async (app) => {
+  app.get("/date-context", { preHandler: app.authenticate }, async () => {
+    const state = await getAuditState(app.db);
+    return {
+      calendarDate: jakartaDate(),
+      businessDate: state.businessDate,
+      lastClosedDate: state.lastClosedDate,
+      recoveryRequired: state.recoveryRequired,
+    };
+  });
+
   app.get("/state", { preHandler: app.requirePermission("night_audit.view") }, async () =>
     getAuditState(app.db),
   );
@@ -208,7 +245,149 @@ export const nightAuditRoutes: FastifyPluginAsync = async (app) => {
           .code(404)
           .send({ error: { code: "AUDIT_NOT_FOUND", message: "Audit snapshot not found" } });
       }
-      return audit;
+      const [corrections, current] = await Promise.all([
+        app.db
+          .select({
+            id: auditLogs.id,
+            actorName: users.name,
+            reason: auditLogs.reason,
+            beforeData: auditLogs.beforeData,
+            afterData: auditLogs.afterData,
+            createdAt: auditLogs.createdAt,
+          })
+          .from(auditLogs)
+          .innerJoin(users, eq(auditLogs.actorUserId, users.id))
+          .where(
+            and(
+              eq(auditLogs.entityType, "night_audit"),
+              eq(auditLogs.entityId, audit.id),
+              eq(auditLogs.action, "financial_correction"),
+            ),
+          )
+          .orderBy(asc(auditLogs.createdAt), asc(auditLogs.id)),
+        buildAuditPreview(app.db, audit.businessDate, null),
+      ]);
+      const original = financialSummary((audit.snapshot as AuditPreview).summary);
+      const accepted = corrections.length
+        ? (corrections[corrections.length - 1].afterData as FinancialSummary)
+        : original;
+      const actual = financialSummary(current.summary);
+      return {
+        ...audit,
+        corrections: corrections.map((item) => ({
+          ...item,
+          delta: financialDelta(
+            item.beforeData as FinancialSummary,
+            item.afterData as FinancialSummary,
+          ),
+        })),
+        financialReconciliation: {
+          original,
+          accepted,
+          actual,
+          pendingDelta: financialDelta(accepted, actual),
+          previewToken: current.previewToken,
+        },
+      };
+    },
+  );
+
+  app.post<{ Params: { businessDate: string }; Body: CorrectionBody }>(
+    "/history/:businessDate/corrections",
+    {
+      preHandler: app.requirePermission("night_audit.close"),
+      schema: {
+        params: {
+          type: "object",
+          required: ["businessDate"],
+          properties: { businessDate: dateProperty },
+        },
+        body: {
+          type: "object",
+          additionalProperties: false,
+          required: ["reason", "previewToken"],
+          properties: {
+            reason: { type: "string", minLength: 3, maxLength: 1000 },
+            previewToken: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const actor = request.authUser!;
+      if (!managerRole(actor.roleName)) {
+        return reply
+          .code(403)
+          .send({
+            error: { code: "MANAGER_REQUIRED", message: "Owner or Manager confirmation required" },
+          });
+      }
+      if (!validDate(request.params.businessDate) || !request.body.reason.trim()) {
+        return reply
+          .code(400)
+          .send({ error: { code: "INVALID_CORRECTION", message: "Date and reason are required" } });
+      }
+      try {
+        return await app.db.transaction(
+          async (tx) => {
+            await tx.execute(sql`select pg_advisory_xact_lock(734219, 2)`);
+            const [audit] = await tx
+              .select()
+              .from(nightAudits)
+              .where(eq(nightAudits.businessDate, request.params.businessDate))
+              .limit(1);
+            if (!audit) throw new AuditError("AUDIT_NOT_FOUND", "Audit snapshot not found", 404);
+            const [latest] = await tx
+              .select({ afterData: auditLogs.afterData })
+              .from(auditLogs)
+              .where(
+                and(
+                  eq(auditLogs.entityType, "night_audit"),
+                  eq(auditLogs.entityId, audit.id),
+                  eq(auditLogs.action, "financial_correction"),
+                ),
+              )
+              .orderBy(desc(auditLogs.createdAt), desc(auditLogs.id))
+              .limit(1);
+            const before = latest
+              ? (latest.afterData as FinancialSummary)
+              : financialSummary((audit.snapshot as AuditPreview).summary);
+            const current = await buildAuditPreview(tx, audit.businessDate, null);
+            if (current.previewToken !== request.body.previewToken)
+              throw new AuditError(
+                "PREVIEW_CHANGED",
+                "Audit data has changed. Refresh the correction preview.",
+              );
+            const after = financialSummary(current.summary);
+            const delta = financialDelta(before, after);
+            if (!hasFinancialDelta(delta))
+              throw new AuditError(
+                "NO_FINANCIAL_CHANGE",
+                "No financial difference needs confirmation.",
+              );
+            const [entry] = await tx
+              .insert(auditLogs)
+              .values({
+                actorUserId: actor.id,
+                entityType: "night_audit",
+                entityId: audit.id,
+                action: "financial_correction",
+                beforeData: before,
+                afterData: after,
+                reason: request.body.reason.trim(),
+              })
+              .returning({ id: auditLogs.id, createdAt: auditLogs.createdAt });
+            return { id: entry.id, createdAt: entry.createdAt, before, after, delta };
+          },
+          { isolationLevel: "serializable" },
+        );
+      } catch (error) {
+        if (error instanceof AuditError)
+          return reply
+            .code(error.statusCode)
+            .send({ error: { code: error.code, message: error.message } });
+        throw error;
+      }
     },
   );
 

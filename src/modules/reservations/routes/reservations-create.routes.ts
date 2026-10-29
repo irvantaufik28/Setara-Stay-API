@@ -22,6 +22,7 @@ import { rolePermissions } from "../../../db/schema/role_permissions.schema.js";
 import { roomInventoryDaily } from "../../../db/schema/room_inventory_daily.schema.js";
 import { roomTypeCapacityPatterns } from "../../../db/schema/room_type_capacity_patterns.schema.js";
 import { roomUnits } from "../../../db/schema/room_units.schema.js";
+import { roomStatusEvents } from "../../../db/schema/room_status_events.schema.js";
 import { readActiveMaintenanceBlocks } from "../../rooms/services/room-maintenance.service.js";
 import { recordReservationEvent } from "../services/reservation-events.service.js";
 import {
@@ -1359,6 +1360,18 @@ export const reservationCreateRoutes: FastifyPluginAsync = async (app) => {
               .update(roomUnits)
               .set({ operationalStatus: "occupied", updatedAt: checkedInAt! })
               .where(inArray(roomUnits.id, assignedUnitIds));
+            if (assignedUnitIds.length)
+              await tx
+                .insert(roomStatusEvents)
+                .values(
+                  assignedUnitIds.map((roomUnitId) => ({
+                    roomUnitId,
+                    statusBefore: "available",
+                    statusAfter: "occupied",
+                    actorUserId: request.authUser!.id,
+                    source: "checkin",
+                  })),
+                );
             await recordReservationEvent(tx, {
               reservationId: id,
               eventType: "guest.checked_in",

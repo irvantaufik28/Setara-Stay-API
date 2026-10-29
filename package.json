@@ -21,6 +21,7 @@
     "test:openrouter": "node --env-file-if-exists=.env --import tsx src/scripts/openrouter-smoke-test.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
+    "db:migrate:room-status": "node --env-file-if-exists=.env scripts/apply-room-status-history.mjs",
     "db:studio": "drizzle-kit studio",
     "db:seed": "node --env-file-if-exists=.env --import tsx src/db/seed.ts",
     "db:seed:master": "node --env-file-if-exists=.env --import tsx src/db/seed-master.ts",

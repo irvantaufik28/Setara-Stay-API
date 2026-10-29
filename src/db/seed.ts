@@ -114,7 +114,7 @@ const permissionSeeds: PermissionSeed[] = [
     code: "rooms.change_operational_status",
     module: "Rooms",
     label: "Change Room Operational Status",
-    allowed: operations,
+    allowed: all,
   },
   {
     code: "prices_stocks.view",

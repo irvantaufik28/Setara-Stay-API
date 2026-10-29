@@ -6,6 +6,7 @@ import { reservationDeposits } from "../../../db/schema/reservation_deposits.sch
 import { reservationRooms } from "../../../db/schema/reservation_rooms.schema.js";
 import { reservations } from "../../../db/schema/reservations.schema.js";
 import { roomUnits } from "../../../db/schema/room_units.schema.js";
+import { roomStatusEvents } from "../../../db/schema/room_status_events.schema.js";
 import { readActiveMaintenanceBlocks } from "../../rooms/services/room-maintenance.service.js";
 import { uuidSchema } from "../../master/master.shared.js";
 import { recordReservationEvent } from "../services/reservation-events.service.js";
@@ -331,6 +332,18 @@ export const reservationCheckInRoutes: FastifyPluginAsync = async (app) => {
             .update(roomUnits)
             .set({ operationalStatus: "occupied", updatedAt: new Date() })
             .where(inArray(roomUnits.id, unitIds));
+          if (unitIds.length)
+            await tx
+              .insert(roomStatusEvents)
+              .values(
+                unitIds.map((roomUnitId) => ({
+                  roomUnitId,
+                  statusBefore: "available",
+                  statusAfter: "occupied",
+                  actorUserId: request.authUser!.id,
+                  source: "checkin",
+                })),
+              );
 
           const checkedInAt = new Date();
           const guestNik = request.body?.guestNik?.trim();

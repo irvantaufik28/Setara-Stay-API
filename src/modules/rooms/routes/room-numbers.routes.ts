@@ -1,8 +1,11 @@
-import { and, asc, eq, ilike, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, ne, or, sql } from "drizzle-orm";
 import type { FastifyPluginAsync } from "fastify";
 import { masterItems } from "../../../db/schema/master_items.schema.js";
 import { roomTypes } from "../../../db/schema/room_types.schema.js";
 import { roomUnits } from "../../../db/schema/room_units.schema.js";
+import { roomStatusEvents } from "../../../db/schema/room_status_events.schema.js";
+import { roomMaintenanceBlocks } from "../../../db/schema/room_maintenance_blocks.schema.js";
+import { users } from "../../../db/schema/users.schema.js";
 import { databaseErrorCode, uuidSchema } from "../../master/master.shared.js";
 import {
   roomNumberBodySchema,
@@ -86,6 +89,31 @@ export const roomNumberRoutes: FastifyPluginAsync = async (app) => {
       .leftJoin(masterItems, eq(roomUnits.floorId, masterItems.id));
   }
 
+  app.get(
+    "/status-history",
+    { preHandler: app.requirePermission("rooms.view_numbers") },
+    async () => {
+      const items = await app.db
+        .select({
+          id: roomStatusEvents.id,
+          roomUnitId: roomStatusEvents.roomUnitId,
+          roomNumber: roomUnits.roomNumber,
+          statusBefore: roomStatusEvents.statusBefore,
+          statusAfter: roomStatusEvents.statusAfter,
+          source: roomStatusEvents.source,
+          occurredAt: roomStatusEvents.occurredAt,
+          actorUserId: roomStatusEvents.actorUserId,
+          actorName: users.name,
+        })
+        .from(roomStatusEvents)
+        .innerJoin(roomUnits, eq(roomStatusEvents.roomUnitId, roomUnits.id))
+        .innerJoin(users, eq(roomStatusEvents.actorUserId, users.id))
+        .orderBy(desc(roomStatusEvents.occurredAt))
+        .limit(30);
+      return { items };
+    },
+  );
+
   app.get<{ Querystring: ListQuery }>(
     "/",
     {
@@ -162,6 +190,38 @@ export const roomNumberRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
+  app.get<{ Params: IdParams }>(
+    "/:id/status-history",
+    {
+      preHandler: app.requirePermission("rooms.view_numbers"),
+      schema: { params: roomNumberParamsSchema },
+    },
+    async (request, reply) => {
+      const [room] = await app.db
+        .select({ id: roomUnits.id })
+        .from(roomUnits)
+        .where(eq(roomUnits.id, request.params.id))
+        .limit(1);
+      if (!room) return reply.code(404).send(errorBody("NOT_FOUND", "Room number not found"));
+      const items = await app.db
+        .select({
+          id: roomStatusEvents.id,
+          statusBefore: roomStatusEvents.statusBefore,
+          statusAfter: roomStatusEvents.statusAfter,
+          source: roomStatusEvents.source,
+          occurredAt: roomStatusEvents.occurredAt,
+          actorUserId: roomStatusEvents.actorUserId,
+          actorName: users.name,
+        })
+        .from(roomStatusEvents)
+        .innerJoin(users, eq(roomStatusEvents.actorUserId, users.id))
+        .where(eq(roomStatusEvents.roomUnitId, request.params.id))
+        .orderBy(desc(roomStatusEvents.occurredAt))
+        .limit(100);
+      return { items };
+    },
+  );
+
   app.post<{ Body: RoomNumberBody }>(
     "/",
     {
@@ -210,20 +270,76 @@ export const roomNumberRoutes: FastifyPluginAsync = async (app) => {
       if (referenceError)
         return reply.code(400).send(errorBody("INVALID_REFERENCE", referenceError));
       try {
-        const [updated] = await app.db
-          .update(roomUnits)
-          .set({ ...roomNumberValues(request.body), updatedAt: new Date() })
-          .where(and(eq(roomUnits.id, request.params.id), ne(roomUnits.operationalStatus, "occupied")))
-          .returning({ id: roomUnits.id });
-        if (!updated) {
-          const [existing] = await app.db.select({ id: roomUnits.id }).from(roomUnits)
-            .where(eq(roomUnits.id, request.params.id)).limit(1);
-          return existing
-            ? reply.code(409).send(errorBody("ROOM_OCCUPIED", "Room is occupied; edit after checkout"))
-            : reply.code(404).send(errorBody("NOT_FOUND", "Room number not found"));
-        }
-        const [roomNumber] = await roomQuery().where(eq(roomUnits.id, updated.id)).limit(1);
-        return { roomNumber };
+        return await app.db.transaction(async (tx) => {
+          const [current] = await tx
+            .select()
+            .from(roomUnits)
+            .where(eq(roomUnits.id, request.params.id))
+            .for("update")
+            .limit(1);
+          if (!current)
+            return reply.code(404).send(errorBody("NOT_FOUND", "Room number not found"));
+          if (current.operationalStatus === "occupied")
+            return reply
+              .code(409)
+              .send(errorBody("ROOM_OCCUPIED", "Room is occupied; edit after checkout"));
+          if (current.operationalStatus !== request.body.operationalStatus) {
+            if (
+              request.body.operationalStatus === "available" &&
+              current.operationalStatus !== "cleaning"
+            )
+              return reply
+                .code(409)
+                .send(
+                  errorBody(
+                    "INVALID_STATUS_TRANSITION",
+                    "Only a cleaning room can be marked available",
+                  ),
+                );
+            if (request.body.operationalStatus === "available" && !request.body.isActive)
+              return reply
+                .code(409)
+                .send(errorBody("ROOM_INACTIVE", "Inactive room cannot be marked available"));
+            if (request.body.operationalStatus === "available") {
+              const [block] = await tx
+                .select({ id: roomMaintenanceBlocks.id })
+                .from(roomMaintenanceBlocks)
+                .where(
+                  and(
+                    eq(roomMaintenanceBlocks.roomUnitId, current.id),
+                    sql`${roomMaintenanceBlocks.cancelledAt} is null`,
+                    sql`${roomMaintenanceBlocks.startDate} <= current_date`,
+                    sql`${roomMaintenanceBlocks.endDate} > current_date`,
+                  ),
+                )
+                .limit(1);
+              if (block)
+                return reply
+                  .code(409)
+                  .send(errorBody("ROOM_MAINTENANCE", "Room has active maintenance"));
+            }
+          }
+          await tx
+            .update(roomUnits)
+            .set({ ...roomNumberValues(request.body), updatedAt: new Date() })
+            .where(eq(roomUnits.id, current.id));
+          if (current.operationalStatus !== request.body.operationalStatus)
+            await tx.insert(roomStatusEvents).values({
+              roomUnitId: current.id,
+              statusBefore: current.operationalStatus,
+              statusAfter: request.body.operationalStatus,
+              actorUserId: request.authUser!.id,
+              source: "room_numbers",
+            });
+          const [roomNumber] = await tx
+            .select(roomFields)
+            .from(roomUnits)
+            .innerJoin(roomTypes, eq(roomUnits.roomTypeId, roomTypes.id))
+            .leftJoin(masterItems, eq(roomUnits.floorId, masterItems.id))
+            .where(eq(roomUnits.id, current.id))
+            .limit(1);
+          return { roomNumber };
+        });
       } catch (error) {
         if (databaseErrorCode(error) === "23505")
           return reply
@@ -238,7 +354,13 @@ export const roomNumberRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  app.patch<{ Params: IdParams; Body: { operationalStatus: RoomOperationalStatus } }>(
+  app.patch<{
+    Params: IdParams;
+    Body: {
+      operationalStatus: RoomOperationalStatus;
+      source?: "housekeeping" | "room_rack" | "room_numbers";
+    };
+  }>(
     "/:id/operational-status",
     {
       preHandler: app.requirePermission("rooms.change_operational_status"),
@@ -248,25 +370,89 @@ export const roomNumberRoutes: FastifyPluginAsync = async (app) => {
           type: "object",
           required: ["operationalStatus"],
           additionalProperties: false,
-          properties: { operationalStatus: { type: "string", enum: roomOperationalStatuses } },
+          properties: {
+            operationalStatus: { type: "string", enum: roomOperationalStatuses },
+            source: { type: "string", enum: ["housekeeping", "room_rack", "room_numbers"] },
+          },
         },
       },
     },
     async (request, reply) => {
-      const [updated] = await app.db
-        .update(roomUnits)
-        .set({ operationalStatus: request.body.operationalStatus, updatedAt: new Date() })
-        .where(and(eq(roomUnits.id, request.params.id), ne(roomUnits.operationalStatus, "occupied")))
-        .returning({ id: roomUnits.id });
-      if (!updated) {
-        const [existing] = await app.db.select({ id: roomUnits.id }).from(roomUnits)
-          .where(eq(roomUnits.id, request.params.id)).limit(1);
-        return existing
-          ? reply.code(409).send(errorBody("ROOM_OCCUPIED", "Room is occupied; edit after checkout"))
-          : reply.code(404).send(errorBody("NOT_FOUND", "Room number not found"));
-      }
-      const [roomNumber] = await roomQuery().where(eq(roomUnits.id, updated.id)).limit(1);
-      return { roomNumber };
+      return app.db.transaction(async (tx) => {
+        const [current] = await tx
+          .select()
+          .from(roomUnits)
+          .where(eq(roomUnits.id, request.params.id))
+          .for("update")
+          .limit(1);
+        if (!current) return reply.code(404).send(errorBody("NOT_FOUND", "Room number not found"));
+        if (current.operationalStatus === "occupied")
+          return reply
+            .code(409)
+            .send(errorBody("ROOM_OCCUPIED", "Room is occupied; edit after checkout"));
+        if (current.operationalStatus === request.body.operationalStatus)
+          return reply
+            .code(409)
+            .send(errorBody("STATUS_UNCHANGED", "Room already has this status"));
+        if (
+          request.authUser!.roleName === "Staff" &&
+          (current.operationalStatus !== "cleaning" ||
+            request.body.operationalStatus !== "available")
+        )
+          return reply
+            .code(403)
+            .send(errorBody("FORBIDDEN", "Staff can only mark cleaning rooms available"));
+        if (request.body.operationalStatus === "available") {
+          if (!current.isActive)
+            return reply
+              .code(409)
+              .send(errorBody("ROOM_INACTIVE", "Inactive room cannot be marked available"));
+          if (current.operationalStatus !== "cleaning")
+            return reply
+              .code(409)
+              .send(
+                errorBody(
+                  "INVALID_STATUS_TRANSITION",
+                  "Only a cleaning room can be marked available",
+                ),
+              );
+          const [block] = await tx
+            .select({ id: roomMaintenanceBlocks.id })
+            .from(roomMaintenanceBlocks)
+            .where(
+              and(
+                eq(roomMaintenanceBlocks.roomUnitId, current.id),
+                sql`${roomMaintenanceBlocks.cancelledAt} is null`,
+                sql`${roomMaintenanceBlocks.startDate} <= current_date`,
+                sql`${roomMaintenanceBlocks.endDate} > current_date`,
+              ),
+            )
+            .limit(1);
+          if (block)
+            return reply
+              .code(409)
+              .send(errorBody("ROOM_MAINTENANCE", "Room has active maintenance"));
+        }
+        await tx
+          .update(roomUnits)
+          .set({ operationalStatus: request.body.operationalStatus, updatedAt: new Date() })
+          .where(eq(roomUnits.id, current.id));
+        await tx.insert(roomStatusEvents).values({
+          roomUnitId: current.id,
+          statusBefore: current.operationalStatus,
+          statusAfter: request.body.operationalStatus,
+          actorUserId: request.authUser!.id,
+          source: request.body.source ?? "room_numbers",
+        });
+        const [roomNumber] = await tx
+          .select(roomFields)
+          .from(roomUnits)
+          .innerJoin(roomTypes, eq(roomUnits.roomTypeId, roomTypes.id))
+          .leftJoin(masterItems, eq(roomUnits.floorId, masterItems.id))
+          .where(eq(roomUnits.id, current.id))
+          .limit(1);
+        return { roomNumber };
+      });
     },
   );
 
@@ -280,13 +466,20 @@ export const roomNumberRoutes: FastifyPluginAsync = async (app) => {
       try {
         const [deleted] = await app.db
           .delete(roomUnits)
-          .where(and(eq(roomUnits.id, request.params.id), ne(roomUnits.operationalStatus, "occupied")))
+          .where(
+            and(eq(roomUnits.id, request.params.id), ne(roomUnits.operationalStatus, "occupied")),
+          )
           .returning({ id: roomUnits.id });
         if (!deleted) {
-          const [existing] = await app.db.select({ id: roomUnits.id }).from(roomUnits)
-            .where(eq(roomUnits.id, request.params.id)).limit(1);
+          const [existing] = await app.db
+            .select({ id: roomUnits.id })
+            .from(roomUnits)
+            .where(eq(roomUnits.id, request.params.id))
+            .limit(1);
           return existing
-            ? reply.code(409).send(errorBody("ROOM_OCCUPIED", "Room is occupied; delete after checkout"))
+            ? reply
+                .code(409)
+                .send(errorBody("ROOM_OCCUPIED", "Room is occupied; delete after checkout"))
             : reply.code(404).send(errorBody("NOT_FOUND", "Room number not found"));
         }
         return reply.code(204).send();

@@ -40,6 +40,7 @@ export * from "./roles.schema.js";
 export * from "./room_change_history.schema.js";
 export * from "./room_inventory_daily.schema.js";
 export * from "./room_maintenance_blocks.schema.js";
+export * from "./room_status_events.schema.js";
 export * from "./room_type_amenities.schema.js";
 export * from "./room_type_capacity_patterns.schema.js";
 export * from "./room_type_images.schema.js";

@@ -7,6 +7,7 @@ import { reservationRooms } from "../../../db/schema/reservation_rooms.schema.js
 import { reservations } from "../../../db/schema/reservations.schema.js";
 import { rolePermissions } from "../../../db/schema/role_permissions.schema.js";
 import { roomUnits } from "../../../db/schema/room_units.schema.js";
+import { roomStatusEvents } from "../../../db/schema/room_status_events.schema.js";
 import { uuidSchema } from "../../master/master.shared.js";
 import { recordReservationEvent } from "../services/reservation-events.service.js";
 import {
@@ -379,7 +380,16 @@ export const reservationCheckOutRoutes: FastifyPluginAsync = async (app) => {
             .map((room) => room.roomUnitId)
             .filter((id): id is string => Boolean(id));
           if (roomUnitIds.length) {
-            await tx
+            const priorStatuses = await tx
+              .select({ id: roomUnits.id, status: roomUnits.operationalStatus })
+              .from(roomUnits)
+              .where(
+                and(
+                  inArray(roomUnits.id, roomUnitIds),
+                  notInArray(roomUnits.operationalStatus, ["maintenance", "out_of_service"]),
+                ),
+              );
+            const changedRooms = await tx
               .update(roomUnits)
               .set({ operationalStatus: "cleaning", updatedAt: new Date() })
               .where(
@@ -387,7 +397,24 @@ export const reservationCheckOutRoutes: FastifyPluginAsync = async (app) => {
                   inArray(roomUnits.id, roomUnitIds),
                   notInArray(roomUnits.operationalStatus, ["maintenance", "out_of_service"]),
                 ),
-              );
+              )
+              .returning({ id: roomUnits.id });
+            const statusById = new Map(priorStatuses.map((room) => [room.id, room.status]));
+            const changedStatusRooms = changedRooms.filter(
+              (room) => statusById.get(room.id) !== "cleaning",
+            );
+            if (changedStatusRooms.length)
+              await tx
+                .insert(roomStatusEvents)
+                .values(
+                  changedStatusRooms.map((room) => ({
+                    roomUnitId: room.id,
+                    statusBefore: statusById.get(room.id)!,
+                    statusAfter: "cleaning",
+                    actorUserId: request.authUser!.id,
+                    source: "checkout",
+                  })),
+                );
           }
 
           const checkedOutAt = new Date();
